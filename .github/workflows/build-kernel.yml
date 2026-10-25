@@ -65,7 +65,6 @@ jobs:
         cp -r temp_ksu/kernel/* drivers/KernelSU/
         rm -rf temp_ksu
         
-        # 1. 干掉防盗版检查
         cd drivers/KernelSU
         git init > /dev/null 2>&1
         git config user.email "ci@github.com"
@@ -76,22 +75,17 @@ jobs:
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
         echo 'subdir-ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
         
-        # 修复 preinit 的 include 路径
         if [ -d "uapi" ] && [ -d "preinit/runner" ]; then
             cp -r uapi preinit/runner/
         fi
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
-        # 2. 写入 Kconfig 和 Makefile
         echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
         echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
         
-        # 3. 自动注入内核 Hook 代码 (极其精准的注入，防止破坏宏结构)
         cat << 'PYEOF' > inject_hooks.py
         import os
         import re
-
-        # 1. fs/exec.c
         with open('fs/exec.c', 'r') as f: exec_c = f.read()
         if 'ksu_handle_execveat' not in exec_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n__attribute__((hot))\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n'
@@ -101,7 +95,6 @@ jobs:
             exec_c = exec_c.replace(old_body, new_body)
             with open('fs/exec.c', 'w') as f: f.write(exec_c)
             
-        # 2. fs/open.c
         with open('fs/open.c', 'r') as f: open_c = f.read()
         if 'ksu_handle_faccessat' not in open_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n'
@@ -109,16 +102,12 @@ jobs:
             open_c = open_c.replace('return do_faccessat(dfd, filename, mode);', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);')
             with open('fs/open.c', 'w') as f: f.write(open_c)
             
-        # 3. fs/stat.c (最复杂的部分，精准锚定)
         with open('fs/stat.c', 'r') as f: stat_c = f.read()
         if 'ksu_handle_stat' not in stat_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n#endif\n'
             stat_c = re.sub(r'(SYSCALL_DEFINE4\(newfstatat,)', decl + r'\n\1', stat_c, count=1)
-            
-            # 注入 newfstatat
             stat_c = stat_c.replace('error = vfs_fstatat(dfd, filename, &stat, flag);', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);')
             
-            # 注入 newfstat
             def fix_newfstat(m):
                 body = m.group(0)
                 if 'ksu_handle_newfstat_ret' not in body:
@@ -126,17 +115,14 @@ jobs:
                 return body
             stat_c = re.sub(r'SYSCALL_DEFINE2\(newfstat,.*?\n\}', fix_newfstat, stat_c, flags=re.DOTALL)
             
-            # 注入 fstat64
             def fix_fstat64(m):
                 body = m.group(0)
                 if 'ksu_handle_fstat64_ret' not in body:
                     body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;')
                 return body
             stat_c = re.sub(r'SYSCALL_DEFINE2\(fstat64,.*?\n\}', fix_fstat64, stat_c, flags=re.DOTALL)
-            
             with open('fs/stat.c', 'w') as f: f.write(stat_c)
             
-        # 4. kernel/reboot.c
         with open('kernel/reboot.c', 'r') as f: reboot_c = f.read()
         if 'ksu_handle_sys_reboot' not in reboot_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n'
@@ -146,7 +132,6 @@ jobs:
         PYEOF
         python3 inject_hooks.py
         
-        # 4. 写入 defconfig
         echo "CONFIG_KSU=y" >> arch/${{ env.ARCH }}/configs/${{ env.KERNEL_CONFIG }}
         echo "CONFIG_KSU_MANUAL_HOOK=y" >> arch/${{ env.ARCH }}/configs/${{ env.KERNEL_CONFIG }}
         echo "CONFIG_KALLSYMS_ALL=y" >> arch/${{ env.ARCH }}/configs/${{ env.KERNEL_CONFIG }}
@@ -192,15 +177,24 @@ jobs:
         export HOSTLD=ld.lld
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        make -j4 CC=clang O=out ARCH=${{ env.ARCH }} ${{ env.KERNEL_CONFIG }}
+        make -j2 CC=clang O=out ARCH=${{ env.ARCH }} ${{ env.KERNEL_CONFIG }}
         
+        # 使用 -j2 (满血2核)，如果失败输出最后100行日志
         if [ ${{ env.ENABLE_CCACHE }} = true ]; then
-            make -j4 CC="ccache clang" O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && cat build.log && exit 1)
+            make -j2 CC="ccache clang" O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && tail -n 100 build.log && exit 1)
         else
-            make -j4 CC=clang O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && cat build.log && exit 1)
+            make -j2 CC=clang O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && tail -n 100 build.log && exit 1)
         fi
 
+    - name: Upload Build Log on Failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-failed-log
+        path: kernel_workspace/android-kernel/build.log
+
     - name: Check a kernel output files
+      if: success()
       run: |
        cd $GITHUB_WORKSPACE/kernel_workspace
        if [ -f android-kernel/out/arch/${{ env.ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} ]; then
@@ -211,7 +205,7 @@ jobs:
        fi
 
     - name: Make Anykernel3
-      if: env.CHECK_FILE_IS_OK == 'true'
+      if: success() && env.CHECK_FILE_IS_OK == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone https://github.com/osm0sis/AnyKernel3
@@ -222,7 +216,7 @@ jobs:
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
     - name: Upload AnyKernel3
-      if: env.CHECK_FILE_IS_OK == 'true'
+      if: success() && env.CHECK_FILE_IS_OK == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: AnyKernel3${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
