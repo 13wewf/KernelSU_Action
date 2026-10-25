@@ -73,11 +73,12 @@ jobs:
         git commit -m "Fake submodule" --quiet > /dev/null 2>&1
         sed -i 's/\$(error/\$(info/g' Kbuild || true
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
-        echo 'subdir-ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
         
-        if [ -d "uapi" ] && [ -d "preinit/runner" ]; then
-            cp -r uapi preinit/runner/
-        fi
+        # 修复头文件路径找不到的问题
+        echo 'ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
+        cp -r uapi preinit/runner/ || true
+        cp -r uapi policy/ || true
+        
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
         echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
@@ -111,14 +112,15 @@ jobs:
             def fix_newfstat(m):
                 body = m.group(0)
                 if 'ksu_handle_newfstat_ret' not in body:
-                    body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n\treturn error;')
+                    # 强制类型转换，避免 compat 版本的警告
+                    body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, (struct stat __user **)&statbuf);\n#endif\n\treturn error;')
                 return body
             stat_c = re.sub(r'SYSCALL_DEFINE2\(newfstat,.*?\n\}', fix_newfstat, stat_c, flags=re.DOTALL)
             
             def fix_fstat64(m):
                 body = m.group(0)
                 if 'ksu_handle_fstat64_ret' not in body:
-                    body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n\treturn error;')
+                    body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, (struct stat64 __user **)&statbuf);\n#endif\n\treturn error;')
                 return body
             stat_c = re.sub(r'SYSCALL_DEFINE2\(fstat64,.*?\n\}', fix_fstat64, stat_c, flags=re.DOTALL)
             with open('fs/stat.c', 'w') as f: f.write(stat_c)
@@ -179,7 +181,6 @@ jobs:
         
         make -j2 CC=clang O=out ARCH=${{ env.ARCH }} ${{ env.KERNEL_CONFIG }}
         
-        # 使用 -j2 (满血2核)，如果失败输出最后100行日志
         if [ ${{ env.ENABLE_CCACHE }} = true ]; then
             make -j2 CC="ccache clang" O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && tail -n 100 build.log && exit 1)
         else
