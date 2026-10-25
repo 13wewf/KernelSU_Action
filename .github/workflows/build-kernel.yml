@@ -75,17 +75,19 @@ jobs:
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
         
         # ================= 核心修复：暴力修正头文件包含路径 =================
-        # 修复 preinit/runner/runner.c 里的 supercall.h 路径（向上两层）
-        sed -i 's|#include "uapi/supercall.h"|#include "../../uapi/supercall.h"|g' preinit/runner/runner.c || true
+        # 恢复原版相对路径（不再向上跳级）
+        sed -i 's|#include "../../uapi/|#include "uapi/|g' preinit/runner/runner.c || true
+        sed -i 's|#include "../uapi/|#include "uapi/|g' policy/app_profile.h || true
         
-        # 修复 policy 目录下的头文件包含路径（向上一层）
-        sed -i 's|#include "uapi/|#include "../uapi/|g' policy/*.h || true
+        # 将 uapi 目录直接复制进报错的文件同级目录，实现“水来土掩”
+        if [ -d "uapi" ]; then
+            cp -r uapi preinit/runner/ || true
+            cp -r uapi policy/ || true
+            cp -r uapi core/ || true
+        fi
         
-        # 修复 core 目录下的头文件包含路径（向上一层）
-        sed -i 's|#include "uapi/|#include "../uapi/|g' core/*.c || true
-        
-        # 最后在 Kbuild 里加上全局头文件搜索路径，双保险
-        echo 'ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
+        # 添加全局头文件搜索路径作为双保险
+        echo 'subdir-ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild || true
         
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
