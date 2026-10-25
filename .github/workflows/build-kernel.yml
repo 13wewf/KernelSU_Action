@@ -81,42 +81,55 @@ jobs:
         echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
         echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
         
-        # 3. 自动注入内核 Hook 代码 (只注入 64 位部分，避开 32 位 compat 宏)
+        # 3. 自动注入内核 Hook 代码 (极其精准的注入，不破坏任何宏)
         cat << 'PYEOF' > inject_hooks.py
         import os
+        import re
+
+        # 1. fs/exec.c
         with open('fs/exec.c', 'r') as f: exec_c = f.read()
         if 'ksu_handle_execveat' not in exec_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n__attribute__((hot))\nextern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n#endif\n'
-            exec_c = exec_c.replace('static int do_execveat_common(', decl + '\nstatic int do_execveat_common(')
+            exec_c = re.sub(r'(static int do_execveat_common\()', decl + r'\n\1', exec_c, count=1)
             old_body = 'return __do_execve_file(fd, filename, argv, envp, flags, NULL);'
             new_body = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tint retval;\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n\tretval = __do_execve_file(fd, filename, argv, envp, flags, NULL);\n\tksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);\n\treturn retval;\n#else\n\treturn __do_execve_file(fd, filename, argv, envp, flags, NULL);\n#endif\n'
             exec_c = exec_c.replace(old_body, new_body)
             with open('fs/exec.c', 'w') as f: f.write(exec_c)
             
+        # 2. fs/open.c
         with open('fs/open.c', 'r') as f: open_c = f.read()
         if 'ksu_handle_faccessat' not in open_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n'
-            open_c = open_c.replace('SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)', decl + '\nSYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)')
-            hook = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n'
-            open_c = open_c.replace('SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{', 'SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{\n' + hook)
+            open_c = re.sub(r'(SYSCALL_DEFINE3\(faccessat,)', decl + r'\n\1', open_c, count=1)
+            # 精准在 faccessat 执行操作前插入 hook
+            open_c = open_c.replace('return do_faccessat(dfd, filename, mode);', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\treturn do_faccessat(dfd, filename, mode);')
             with open('fs/open.c', 'w') as f: f.write(open_c)
             
+        # 3. fs/stat.c (最复杂的部分，精准锚定)
         with open('fs/stat.c', 'r') as f: stat_c = f.read()
         if 'ksu_handle_stat' not in stat_c:
-            decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#endif\n'
-            stat_c = stat_c.replace('SYSCALL_DEFINE4(newfstatat,', decl + '\nSYSCALL_DEFINE4(newfstatat,')
-            hook_nfstatat = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n'
-            stat_c = stat_c.replace('SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{', 'SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n' + hook_nfstatat)
-            hook_nfstat = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n'
-            stat_c = stat_c.replace('\terror = cp_new_stat(&stat, statbuf);\n\n\treturn error;', '\terror = cp_new_stat(&stat, statbuf);\n\n' + hook_nfstat + '\n\treturn error;')
+            decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n#endif\n'
+            stat_c = re.sub(r'(SYSCALL_DEFINE4\(newfstatat,)', decl + r'\n\1', stat_c, count=1)
+            
+            # 注入 newfstatat / fstatat64（针对 vfs_fstatat）
+            stat_c = stat_c.replace('error = vfs_fstatat(dfd, filename, &stat, flag);', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n\terror = vfs_fstatat(dfd, filename, &stat, flag);')
+            
+            # 注入 newfstat (针对 cp_new_stat)
+            stat_c = stat_c.replace('error = cp_new_stat(&stat, statbuf);', 'error = cp_new_stat(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n')
+            
+            # 注入 fstat64 (针对 cp_new_stat64)
+            if 'cp_new_stat64' in stat_c:
+                stat_c = stat_c.replace('error = cp_new_stat64(&stat, statbuf);', 'error = cp_new_stat64(&stat, statbuf);\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n')
+                
             with open('fs/stat.c', 'w') as f: f.write(stat_c)
             
+        # 4. kernel/reboot.c
         with open('kernel/reboot.c', 'r') as f: reboot_c = f.read()
         if 'ksu_handle_sys_reboot' not in reboot_c:
             decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n'
-            reboot_c = reboot_c.replace('SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)', decl + '\nSYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)')
-            hook = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
-            reboot_c = reboot_c.replace('SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{', 'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,\n\t\tvoid __user *, arg)\n{\n' + hook)
+            reboot_c = re.sub(r'(SYSCALL_DEFINE4\(reboot,)', decl + r'\n\1', reboot_c, count=1)
+            # 在权限检查前插入 hook
+            reboot_c = reboot_c.replace('if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n\tif (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))')
             with open('kernel/reboot.c', 'w') as f: f.write(reboot_c)
         PYEOF
         python3 inject_hooks.py
