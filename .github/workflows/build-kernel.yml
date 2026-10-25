@@ -74,9 +74,17 @@ jobs:
         sed -i 's/\$(error/\$(info/g' Kbuild || true
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
         
-        # 修复头文件路径报错 (关键)
-        sed -i 's|#include "uapi/|#include "../../uapi/|g' preinit/runner/runner.c || true
-        sed -i 's|#include "uapi/|#include "../uapi/|g' policy/app_profile.h || true
+        # 【核心修复】：把 uapi 目录复制到它需要的每一个子目录中
+        if [ -d "uapi" ]; then
+            cp -r uapi preinit/runner/ || true
+            cp -r uapi policy/ || true
+            cp -r uapi core/ || true
+        fi
+        
+        # 【核心修复】：撤销之前的错误修改，恢复默认的 "uapi/..." 路径
+        sed -i 's|#include "../../uapi/|#include "uapi/|g' preinit/runner/runner.c || true
+        sed -i 's|#include "../uapi/|#include "uapi/|g' policy/app_profile.h || true
+        sed -i 's|#include "../../uapi/|#include "uapi/|g' core/init.c || true
         
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
