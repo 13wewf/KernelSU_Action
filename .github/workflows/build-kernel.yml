@@ -113,13 +113,13 @@ jobs:
         export HOSTLD=ld.lld
         export CROSS_COMPILE=aarch64-linux-gnu-
         
-        make -j$(nproc --all) CC=clang O=out ARCH=${{ env.ARCH }} ${{ env.KERNEL_CONFIG }}
+        make -j4 CC=clang O=out ARCH=${{ env.ARCH }} ${{ env.KERNEL_CONFIG }}
         
-        # 抓取错误日志的关键修改：
+        # ===== 修改点：强制限制为 -j4 防止内存溢出，并输出所有日志 =====
         if [ ${{ env.ENABLE_CCACHE }} = true ]; then
-            make -j$(nproc --all) CC="ccache clang" O=out ARCH=${{ env.ARCH }} 2>&1 | tee build.log || (echo "==== BUILD FAILED, LAST 100 LINES ====" && tail -n 100 build.log && exit 1)
+            make -j4 CC="ccache clang" O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && cat build.log && exit 1)
         else
-            make -j$(nproc --all) CC=clang O=out ARCH=${{ env.ARCH }} 2>&1 | tee build.log || (echo "==== BUILD FAILED, LAST 100 LINES ====" && tail -n 100 build.log && exit 1)
+            make -j4 CC=clang O=out ARCH=${{ env.ARCH }} > build.log 2>&1 || (echo "==== BUILD FAILED ====" && cat build.log && exit 1)
         fi
 
     - name: Check a kernel output files
