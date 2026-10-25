@@ -74,10 +74,9 @@ jobs:
         sed -i 's/\$(error/\$(info/g' Kbuild || true
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
         
-        # 修复头文件路径找不到的问题
-        echo 'ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
-        cp -r uapi preinit/runner/ || true
-        cp -r uapi policy/ || true
+        # 修复头文件路径报错 (关键)
+        sed -i 's|#include "uapi/|#include "../../uapi/|g' preinit/runner/runner.c || true
+        sed -i 's|#include "uapi/|#include "../uapi/|g' policy/app_profile.h || true
         
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
@@ -112,7 +111,6 @@ jobs:
             def fix_newfstat(m):
                 body = m.group(0)
                 if 'ksu_handle_newfstat_ret' not in body:
-                    # 强制类型转换，避免 compat 版本的警告
                     body = body.replace('return error;', '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, (struct stat __user **)&statbuf);\n#endif\n\treturn error;')
                 return body
             stat_c = re.sub(r'SYSCALL_DEFINE2\(newfstat,.*?\n\}', fix_newfstat, stat_c, flags=re.DOTALL)
