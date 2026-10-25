@@ -41,7 +41,6 @@ jobs:
         echo "BUILD_TIME=$(TZ=Asia/Shanghai date "+%Y%m%d%H%M")" >> $GITHUB_ENV
         echo "DEVICE=$(echo ${{ env.KERNEL_CONFIG }} | sed 's!vendor/!!;s/_defconfig//;s/_user//;s/-perf//')" >> $GITHUB_ENV
         sudo apt-get update
-        # 删除了 python2 和 lib32ncurses5-dev，避免 Ubuntu 22.04/24.04 报错
         sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python3
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
@@ -61,8 +60,12 @@ jobs:
       if: env.ENABLE_KERNELSU == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        # 直接克隆 ReSukiSU 驱动源码，不走官方 setup.sh，彻底避开 patch 报错
-        git clone https://github.com/Baka-SU/BakaSU.git KernelSU
+        git clone https://github.com/Baka-SU/BakaSU.git temp_ksu
+        # 关键修复：将真正的内核驱动目录移到 drivers/KernelSU 下
+        mkdir -p drivers/KernelSU
+        cp -r temp_ksu/kernel/* drivers/KernelSU/
+        rm -rf temp_ksu
+        
         # 手动修改 Kconfig 和 Makefile 纳入编译
         echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
         echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
