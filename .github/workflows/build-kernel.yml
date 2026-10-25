@@ -62,7 +62,11 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         git clone https://github.com/Baka-SU/BakaSU.git temp_ksu
         mkdir -p drivers/KernelSU
+        
+        # ================= 核心修复：把 uapi 也拷进来 =================
         cp -r temp_ksu/kernel/* drivers/KernelSU/
+        cp -r temp_ksu/uapi drivers/KernelSU/ 
+        
         rm -rf temp_ksu
         
         cd drivers/KernelSU
@@ -74,12 +78,11 @@ jobs:
         sed -i 's/\$(error/\$(info/g' Kbuild || true
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
         
-        # ================= 核心修复：暴力修正头文件包含路径 =================
-        # 恢复原版相对路径（不再向上跳级）
+        # 恢复原版相对路径
         sed -i 's|#include "../../uapi/|#include "uapi/|g' preinit/runner/runner.c || true
         sed -i 's|#include "../uapi/|#include "uapi/|g' policy/app_profile.h || true
         
-        # 将 uapi 目录直接复制进报错的文件同级目录，实现“水来土掩”
+        # 既然 uapi 已经完整拷进来了，我们直接物理复制到报错的同级目录，实现“水来土掩”
         if [ -d "uapi" ]; then
             cp -r uapi preinit/runner/ || true
             cp -r uapi policy/ || true
