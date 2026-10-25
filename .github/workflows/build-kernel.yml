@@ -65,7 +65,7 @@ jobs:
         cp -r temp_ksu/kernel/* drivers/KernelSU/
         rm -rf temp_ksu
         
-        # 1. 干掉防盗版检查
+        # 1. 干掉防盗版检查，修复 preinit 头文件路径
         cd drivers/KernelSU
         git init > /dev/null 2>&1
         git config user.email "ci@github.com"
@@ -74,13 +74,14 @@ jobs:
         git commit -m "Fake submodule" --quiet > /dev/null 2>&1
         sed -i 's/\$(error/\$(info/g' Kbuild || true
         sed -i '/You should use BakaSU as a git submodule/d' Kbuild || true
+        echo 'ccflags-y += -I$(srctree)/drivers/KernelSU' >> Kbuild
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
         # 2. 写入 Kconfig 和 Makefile
         echo 'source "drivers/KernelSU/Kconfig"' >> drivers/Kconfig
         echo 'obj-$(CONFIG_KSU) += KernelSU/' >> drivers/Makefile
         
-        # 3. 自动注入内核 Hook 代码 (关键步骤！)
+        # 3. 自动注入内核 Hook 代码 (只注入 64 位部分，避开 32 位 compat 宏)
         cat << 'PYEOF' > inject_hooks.py
         import os
         with open('fs/exec.c', 'r') as f: exec_c = f.read()
@@ -102,15 +103,12 @@ jobs:
             
         with open('fs/stat.c', 'r') as f: stat_c = f.read()
         if 'ksu_handle_stat' not in stat_c:
-            decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\nextern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n#endif\n#endif\n'
+            decl = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\nextern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n#endif\n'
             stat_c = stat_c.replace('SYSCALL_DEFINE4(newfstatat,', decl + '\nSYSCALL_DEFINE4(newfstatat,')
             hook_nfstatat = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n'
             stat_c = stat_c.replace('SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{', 'SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,\n\t\tstruct stat __user *, statbuf, int, flag)\n{\n' + hook_nfstatat)
-            stat_c = stat_c.replace('SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat64 __user *, statbuf, int, flag)\n{', 'SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,\n\t\tstruct stat64 __user *, statbuf, int, flag)\n{\n' + hook_nfstatat)
             hook_nfstat = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_newfstat_ret(&fd, &statbuf);\n#endif\n'
             stat_c = stat_c.replace('\terror = cp_new_stat(&stat, statbuf);\n\n\treturn error;', '\terror = cp_new_stat(&stat, statbuf);\n\n' + hook_nfstat + '\n\treturn error;')
-            hook_fstat64 = '\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_fstat64_ret(&fd, &statbuf);\n#endif\n'
-            stat_c = stat_c.replace('\terror = cp_new_stat64(&stat, statbuf);\n\n\treturn error;', '\terror = cp_new_stat64(&stat, statbuf);\n\n' + hook_fstat64 + '\n\treturn error;')
             with open('fs/stat.c', 'w') as f: f.write(stat_c)
             
         with open('kernel/reboot.c', 'r') as f: reboot_c = f.read()
